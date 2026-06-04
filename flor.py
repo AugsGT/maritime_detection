@@ -32,7 +32,7 @@ except Exception as e:
 
 # Configuration
 VIDEO_PATH = r"C:\Storage\maritime_final\data\new1.mp4"
-OUTPUT_VIDEO = r"C:\\Storage\\maritime_final\\mari\\outputs\\sam2_florence_output8.mp4"
+OUTPUT_VIDEO = r"C:\\Storage\\maritime_final\\mari\\outputs\\sam2_florence_output9.mp4"
 
 # Florence model and prompt
 FLORENCE_MODEL_ID = "microsoft/Florence-2-base"
@@ -158,16 +158,21 @@ def get_mask_for_box(predictor, image_rgb, box):
     return mask.astype(bool)
 
 def create_tracker(frame, box):
-    """Create a CSRT tracker compatible with the installed OpenCV version.
+    """Create a tracker compatible with the available OpenCV build.
 
-    Tries the legacy API first (cv2.legacy.TrackerCSRT_create) and falls back
-    to the newer cv2.TrackerCSRT_create if the legacy attribute is unavailable.
+    Tries CSRT via the legacy API first, then the top‑level API, and finally
+    falls back to KCF if CSRT is unavailable.
     """
+    # Try CSRT (most accurate) via legacy module
     try:
         tracker = cv2.legacy.TrackerCSRT_create()
-    except AttributeError:
-        # Fallback for OpenCV builds where the tracker is exposed at the top level
-        tracker = cv2.TrackerCSRT_create()
+    except Exception:
+        try:
+            # Some builds expose CSRT directly at the top level
+            tracker = cv2.TrackerCSRT_create()
+        except Exception:
+            # Final fallback to KCF (always available in most builds)
+            tracker = cv2.legacy.TrackerKCF_create() if hasattr(cv2, "legacy") else cv2.TrackerKCF_create()
     x1, y1, x2, y2 = map(int, box)
     tracker.init(frame, (x1, y1, x2 - x1, y2 - y1))
     return tracker
@@ -181,7 +186,13 @@ def draw_tip(frame, mask, color=(0, 0, 255)):
     ys, xs = np.where(mask)
     if len(xs) == 0:
         return
-    tip_x, tip_y = int(xs.min()), int(ys.min())
+    # Find the topmost row (minimum y)
+    min_y = ys.min()
+    # Get all x coordinates on that topmost row
+    xs_top = xs[ys == min_y]
+    # Use the median x (or mean) to place the tip centrally
+    tip_x = int(xs_top.mean())
+    tip_y = int(min_y)
     cv2.circle(frame, (tip_x, tip_y), 4, color, -1)
 
 # Main processing loop
@@ -223,10 +234,17 @@ def main():
 
             # Run Florence detection for all classes
             raw_detections = detect_florence(frame, florence_model, florence_processor)
-            # Apply cross‑prompt NMS (no max limit)
-            detections = nms_detections(raw_detections, iou_threshold=0.7)
+            # Apply cross‑prompt NMS with tighter IoU threshold (0.25)
+            detections = nms_detections(raw_detections, iou_threshold=0.25)
             # Associate detections with existing tracks or create new ones
             match_tracks(detections, tracks, frame)
+
+            # After matching/creating tracks, draw masks and tips for all tracks
+            full_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            for trk in tracks:
+                mask = get_mask_for_box(sam_predictor, full_rgb, trk["box"])
+                draw_mask(frame, mask, color=(0, 255, 0), alpha=0.4)
+                draw_tip(frame, mask, color=(0, 0, 255))
         else:
             # Draw existing trackers (boxes + label) for continuity
             # Draw existing tracks when no new detection
@@ -236,6 +254,11 @@ def main():
                     x, y, w, h = map(int, bbox)
                     # Update stored box
                     trk['box'] = [x, y, x + w, y + h]
+                    # Draw mask and tip for this updated track
+                    full_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mask = get_mask_for_box(sam_predictor, full_rgb, trk["box"])
+                    draw_mask(frame, mask, color=(0, 255, 0), alpha=0.4)
+                    draw_tip(frame, mask, color=(0, 0, 255))
                     # Choose a color based on label hash for consistency
                     color = tuple(int((hash(trk['label']) + i * 50) % 256) for i in (0, 1, 2))
                     cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
